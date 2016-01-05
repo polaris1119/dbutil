@@ -1,3 +1,9 @@
+// Copyright 2016 polaris. All rights reserved.
+// Use of this source code is governed by a MIT-style
+// license that can be found in the LICENSE file.
+// http://studygolang.com
+// Author：polaris	studygolang@gmail.com
+
 package dbutil
 
 import (
@@ -5,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 	"unicode"
 
@@ -26,17 +33,24 @@ func init() {
 }
 
 type Dao struct {
-	table         string
-	fields        string
-	where         string
-	whereVal      []interface{}
+	table string
+
+	fields string
+
+	where    string
+	whereVal []interface{}
+
+	set    string
+	setVal []interface{}
+
 	orderBy       string
 	offset, total int
 }
 
 func NewDao() *Dao {
 	return &Dao{
-	//fields: "*",
+		whereVal: []interface{}{},
+		setVal:   []interface{}{},
 	}
 }
 
@@ -100,6 +114,8 @@ func (d *Dao) FindOne(entity interface{}) error {
 	}
 	defer rows.Close()
 
+	d.reset()
+
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
@@ -117,28 +133,11 @@ func (d *Dao) FindOne(entity interface{}) error {
 	}
 
 	fieldNum := entityVal.NumField()
-	for i := 0; i < fieldNum; i++ {
-		structField := entityType.Field(i)
-		columnName := structField.Tag.Get("db")
-		if columnName == "" {
-			columnName = structField.Tag.Get("json")
-			if columnName == "" {
-				columnName = UnderscoreName(structField.Name)
-			}
-		}
-
-		pos := SearchString(columns, columnName)
-		destVal := dests[pos]
-
-		filedVal := entityVal.Field(i)
-		if filedVal.CanSet() {
-			assignTo(filedVal, reflect.ValueOf(destVal).Elem())
-		}
-	}
+	d.fillStructFields(fieldNum, entityType, entityVal, dests, columns)
 	return nil
 }
 
-// entities 是指向 model slice 类型的指针
+// 如果 slice 的 len != cap，entitiesb必须是指向 model slice 类型的指针
 func (d *Dao) FindAll(entities interface{}) error {
 	entitiesVal := reflect.ValueOf(entities)
 	entitiesType := reflect.TypeOf(entities)
@@ -168,6 +167,10 @@ func (d *Dao) FindAll(entities interface{}) error {
 
 	fieldNum := entityType.NumField()
 
+	if tabler, ok := entitiesVal.Index(0).Interface().(Tabler); ok && d.table == "" {
+		d.table = tabler.Table()
+	}
+
 	d.fetchStructFieldNames(entityType)
 
 	stmt, err := db.Prepare(d.genFindSql())
@@ -181,6 +184,8 @@ func (d *Dao) FindAll(entities interface{}) error {
 		return err
 	}
 	defer rows.Close()
+
+	d.reset()
 
 	columns, err := rows.Columns()
 	if err != nil {
@@ -203,25 +208,7 @@ func (d *Dao) FindAll(entities interface{}) error {
 		}
 
 		entityVal = reflect.New(entityType).Elem()
-
-		for i := 0; i < fieldNum; i++ {
-			structField := entityType.Field(i)
-			columnName := structField.Tag.Get("db")
-			if columnName == "" {
-				columnName = structField.Tag.Get("json")
-				if columnName == "" {
-					columnName = UnderscoreName(structField.Name)
-				}
-			}
-
-			pos := SearchString(columns, columnName)
-			destVal := dests[pos]
-
-			filedVal := entityVal.Field(i)
-			if filedVal.CanSet() {
-				assignTo(filedVal, reflect.ValueOf(destVal).Elem())
-			}
-		}
+		d.fillStructFields(fieldNum, entityType, entityVal, dests, columns)
 		entitiesVal.Index(colNum).Set(entityVal.Addr())
 
 		colNum++
@@ -230,10 +217,55 @@ func (d *Dao) FindAll(entities interface{}) error {
 	return nil
 }
 
+func (d *Dao) FindBySql(strSql string, args ...interface{}) (*sql.Rows, error) {
+	stmt, err := db.Prepare(strSql)
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.Query(args...)
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func (d *Dao) FindOneBySql(strSql string, args ...interface{}) error {
+	return nil
+}
+
+func (d *Dao) fillStructFields(fieldNum int, entityType reflect.Type, entityVal reflect.Value, dests []interface{}, columns []string) {
+	for i := 0; i < fieldNum; i++ {
+		structField := entityType.Field(i)
+		columnName := structField.Tag.Get("db")
+		if columnName == "" {
+			columnName = structField.Tag.Get("json")
+			if columnName == "" {
+				columnName = UnderscoreName(structField.Name)
+			}
+		}
+
+		pos := SearchString(columns, columnName)
+		destVal := dests[pos]
+
+		filedVal := entityVal.Field(i)
+		if filedVal.CanSet() {
+			assignTo(filedVal, reflect.ValueOf(destVal).Elem())
+		}
+	}
+}
+
+func (d *Dao) Set(set string, setVal ...interface{}) *Dao {
+	d.set = set
+	d.setVal = setVal
+	return d
+}
+
 func (d *Dao) Insert(entity interface{}) (int64, error) {
 
-	if cruder, ok := entity.(Creater); ok {
-		return cruder.Create()
+	if creater, ok := entity.(Creater); ok {
+		return creater.Create()
 	}
 
 	entityType := reflect.TypeOf(entity)
@@ -249,13 +281,99 @@ func (d *Dao) Insert(entity interface{}) (int64, error) {
 
 	strSql := fmt.Sprintf("INSERT INTO %s(%s) VALUES(%s)", d.table, d.fetchStructFieldNames(entityType), d.fetchStructFieldValues(entityVal))
 
-	fmt.Println(strSql)
 	result, err := db.Exec(strSql)
 	if err != nil {
 		return 0, err
 	}
+	d.reset()
 
 	return result.LastInsertId()
+}
+
+func (d *Dao) Update() (int64, error) {
+
+	strSql := d.genUpdateSql()
+
+	args := append(d.setVal, d.whereVal...)
+	result, err := db.Exec(strSql, args...)
+	if err != nil {
+		return 0, err
+	}
+
+	d.reset()
+
+	return result.RowsAffected()
+}
+
+func (d *Dao) Persist(entity interface{}, updateField string) (int64, error) {
+
+	if updater, ok := entity.(Updater); ok {
+		return updater.Update()
+	}
+
+	entityType := reflect.TypeOf(entity)
+	entityVal := reflect.ValueOf(entity)
+	if entityType.Kind() == reflect.Ptr {
+		entityType = entityType.Elem()
+		entityVal = entityVal.Elem()
+	}
+
+	if tabler, ok := entity.(Tabler); ok {
+		d.table = tabler.Table()
+	}
+
+	updateFields := strings.Split(updateField, ",")
+
+	// 记录没有设置 pk tag 的 Model 默认 pk id
+	var idPk interface{}
+
+	fieldNum := entityVal.NumField()
+	for i := 0; i < fieldNum; i++ {
+		columnName := d.fetchStructFieldName(entityType, i)
+
+		// 是主键
+		if entityType.Field(i).Tag.Get("pk") != "" {
+			d.where += " AND " + columnName + "=?"
+			d.whereVal = append(d.whereVal, entityVal.Field(i).Interface())
+		} else {
+			pos := SearchString(updateFields, columnName)
+			if pos != -1 {
+				d.set += "," + columnName + "=?"
+				d.setVal = append(d.setVal, entityVal.Field(i).Interface())
+			}
+
+			if columnName == "id" {
+				idPk = entityVal.Field(i).Interface()
+			}
+		}
+	}
+
+	// 去除多余的字符
+	if d.where != "" {
+		d.where = d.where[5:] // 开始的 " AND "
+	}
+	if d.set != "" {
+		d.set = d.set[1:] // 开始的 ","
+	}
+
+	if d.set == "" {
+		d.set = "id=?"
+		d.setVal = []interface{}{idPk}
+	}
+
+	strSql := d.genUpdateSql()
+	args := append(d.setVal, d.whereVal...)
+	result, err := db.Exec(strSql, args...)
+	if err != nil {
+		return 0, err
+	}
+	d.reset()
+
+	return result.RowsAffected()
+}
+
+func (d *Dao) Delete(entity interface{}) {
+
 }
 
 func (d *Dao) fetchStructFieldNames(entityType reflect.Type) string {
@@ -267,14 +385,7 @@ func (d *Dao) fetchStructFieldNames(entityType reflect.Type) string {
 
 	numField := entityType.NumField()
 	for i := 0; i < numField; i++ {
-		tag := entityType.Field(i).Tag
-		columnName := tag.Get("db")
-		if columnName == "" {
-			columnName = tag.Get("json")
-			if columnName != "" {
-				columnName = UnderscoreName(entityType.Field(i).Name)
-			}
-		}
+		columnName := d.fetchStructFieldName(entityType, i)
 
 		buffer.Append(",").Append(columnName)
 	}
@@ -282,6 +393,18 @@ func (d *Dao) fetchStructFieldNames(entityType reflect.Type) string {
 	d.fields = buffer.String()[1:]
 
 	return d.fields
+}
+
+func (d *Dao) fetchStructFieldName(entityType reflect.Type, i int) string {
+	tag := entityType.Field(i).Tag
+	columnName := tag.Get("db")
+	if columnName == "" {
+		columnName = tag.Get("json")
+		if columnName != "" {
+			columnName = UnderscoreName(entityType.Field(i).Name)
+		}
+	}
+	return columnName
 }
 
 func (d *Dao) fetchStructFieldValues(entityVal reflect.Value) string {
@@ -321,6 +444,35 @@ func (d *Dao) genFindSql() string {
 	}
 
 	return buffer.String()
+}
+
+func (d *Dao) genUpdateSql() string {
+	buffer := NewBuffer()
+
+	buffer.Append(fmt.Sprintf("UPDATE %s SET %s", d.table, d.set))
+
+	if d.where == "" {
+		// 为了安全，不允许没有条件更新所有数据
+		return ""
+	}
+	buffer.Append(" WHERE ").Append(d.where)
+
+	return buffer.String()
+}
+
+func (d *Dao) reset() {
+	d.table = ""
+	d.fields = ""
+
+	d.where = ""
+	d.whereVal = []interface{}{}
+
+	d.set = ""
+	d.setVal = []interface{}{}
+
+	d.orderBy = ""
+	d.offset = 0
+	d.total = 0
 }
 
 type Tabler interface {
