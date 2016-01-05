@@ -2,7 +2,7 @@
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file.
 // http://studygolang.com
-// Author：polaris	studygolang@gmail.com
+// Author：polaris	polaris@studygolang.com
 
 package dbutil
 
@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/polaris1119/goutils"
 )
 
 const (
@@ -381,7 +382,7 @@ func (d *Dao) fetchStructFieldNames(entityType reflect.Type) string {
 		return d.fields
 	}
 
-	buffer := NewBuffer()
+	buffer := goutils.NewBuffer()
 
 	numField := entityType.NumField()
 	for i := 0; i < numField; i++ {
@@ -408,7 +409,7 @@ func (d *Dao) fetchStructFieldName(entityType reflect.Type, i int) string {
 }
 
 func (d *Dao) fetchStructFieldValues(entityVal reflect.Value) string {
-	buffer := NewBuffer()
+	buffer := goutils.NewBuffer()
 
 	numField := entityVal.NumField()
 	for i := 0; i < numField; i++ {
@@ -427,7 +428,7 @@ func (d *Dao) fetchStructFieldValues(entityVal reflect.Value) string {
 }
 
 func (d *Dao) genFindSql() string {
-	buffer := NewBuffer()
+	buffer := goutils.NewBuffer()
 
 	buffer.Append(fmt.Sprintf("SELECT %s FROM %s", d.fields, d.table))
 
@@ -447,7 +448,7 @@ func (d *Dao) genFindSql() string {
 }
 
 func (d *Dao) genUpdateSql() string {
-	buffer := NewBuffer()
+	buffer := goutils.NewBuffer()
 
 	buffer.Append(fmt.Sprintf("UPDATE %s SET %s", d.table, d.set))
 
@@ -504,7 +505,7 @@ type Cruder interface {
 
 // 驼峰式写法转为下划线写法
 func UnderscoreName(name string) string {
-	buffer := NewBuffer()
+	buffer := goutils.NewBuffer()
 	for i, r := range name {
 		if unicode.IsUpper(r) {
 			if i != 0 {
