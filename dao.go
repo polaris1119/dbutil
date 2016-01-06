@@ -21,15 +21,29 @@ import (
 
 const (
 	dateTimeLayout = "2006-01-02 15:04:05"
+
+	defaultMaxIdleConns = 2
 )
 
 var db *sql.DB
 
-func init() {
+// InitDB maxes 第一个用于设置 SetMaxIdleConns，第二个用于设置 SetMaxOpenConns
+func InitDB(dsn string, maxes ...int) {
 	var err error
-	db, err = sql.Open("mysql", "root:@tcp(localhost:3306)/studygolang?charset=utf8")
+	db, err = sql.Open("mysql", dsn)
 	if err != nil {
 		panic(err)
+	}
+
+	num := len(maxes)
+	if num > 1 {
+		db.SetMaxIdleConns(maxes[0])
+	} else {
+		db.SetMaxIdleConns(defaultMaxIdleConns)
+	}
+
+	if num > 2 {
+		db.SetMaxOpenConns(maxes[1])
 	}
 }
 
@@ -46,6 +60,9 @@ type Dao struct {
 
 	orderBy       string
 	offset, total int
+
+	tx    *sql.Tx
+	txErr error
 }
 
 func NewDao() *Dao {
@@ -103,7 +120,7 @@ func (d *Dao) FindOne(entity interface{}) error {
 
 	d.fetchStructFieldNames(entityType)
 
-	stmt, err := db.Prepare(d.genFindSql())
+	stmt, err := d.prepare(d.genFindSql())
 	if err != nil {
 		return err
 	}
@@ -174,7 +191,7 @@ func (d *Dao) FindAll(entities interface{}) error {
 
 	d.fetchStructFieldNames(entityType)
 
-	stmt, err := db.Prepare(d.genFindSql())
+	stmt, err := d.prepare(d.genFindSql())
 	if err != nil {
 		return err
 	}
@@ -219,7 +236,7 @@ func (d *Dao) FindAll(entities interface{}) error {
 }
 
 func (d *Dao) FindBySql(strSql string, args ...interface{}) (*sql.Rows, error) {
-	stmt, err := db.Prepare(strSql)
+	stmt, err := d.prepare(strSql)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +299,7 @@ func (d *Dao) Insert(entity interface{}) (int64, error) {
 
 	strSql := fmt.Sprintf("INSERT INTO %s(%s) VALUES(%s)", d.table, d.fetchStructFieldNames(entityType), d.fetchStructFieldValues(entityVal))
 
-	result, err := db.Exec(strSql)
+	result, err := d.exec(strSql)
 	if err != nil {
 		return 0, err
 	}
@@ -296,7 +313,7 @@ func (d *Dao) Update() (int64, error) {
 	strSql := d.genUpdateSql()
 
 	args := append(d.setVal, d.whereVal...)
-	result, err := db.Exec(strSql, args...)
+	result, err := d.exec(strSql, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -353,18 +370,17 @@ func (d *Dao) Persist(entity interface{}, updateField string) (int64, error) {
 	if d.where != "" {
 		d.where = d.where[5:] // 开始的 " AND "
 	}
+	if d.where == "" {
+		d.where = "id=?"
+		d.whereVal = []interface{}{idPk}
+	}
 	if d.set != "" {
 		d.set = d.set[1:] // 开始的 ","
 	}
 
-	if d.set == "" {
-		d.set = "id=?"
-		d.setVal = []interface{}{idPk}
-	}
-
 	strSql := d.genUpdateSql()
 	args := append(d.setVal, d.whereVal...)
-	result, err := db.Exec(strSql, args...)
+	result, err := d.exec(strSql, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -375,6 +391,43 @@ func (d *Dao) Persist(entity interface{}, updateField string) (int64, error) {
 
 func (d *Dao) Delete(entity interface{}) {
 
+}
+
+// Begin 开启事务
+func (d *Dao) Begin() {
+	d.tx, d.txErr = db.Begin()
+	return
+}
+
+func (d *Dao) prepare(query string) (*sql.Stmt, error) {
+	if d.tx != nil {
+		if d.txErr != nil {
+			return nil, errors.New("事务开启错误")
+		}
+		return d.tx.Prepare(query)
+	}
+	return db.Prepare(query)
+}
+
+func (d *Dao) exec(query string, args ...interface{}) (sql.Result, error) {
+	if d.tx != nil {
+		if d.txErr != nil {
+			return nil, errors.New("事务开启错误")
+		}
+		return d.tx.Exec(query, args...)
+	}
+
+	return db.Exec(query, args...)
+}
+
+// Commit 提交事务
+func (d *Dao) Commit() error {
+	return d.tx.Commit()
+}
+
+// Rollback 回滚事务
+func (d *Dao) Rollback() error {
+	return d.tx.Rollback()
 }
 
 func (d *Dao) fetchStructFieldNames(entityType reflect.Type) string {
