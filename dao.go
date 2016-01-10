@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -623,6 +624,22 @@ func assignTo(target, value reflect.Value) {
 				break
 			}
 			target.Set(reflect.ValueOf(dt))
+		} else if kind == reflect.Float32 {
+			s := string(v)
+			f, err := strconv.ParseFloat(s, 32)
+			if err != nil {
+				// TODO:
+				break
+			}
+			target.SetFloat(f)
+		} else if kind == reflect.Float64 {
+			s := string(v)
+			f, err := strconv.ParseFloat(s, 64)
+			if err != nil {
+				// TODO:
+				break
+			}
+			target.SetFloat(f)
 		} else {
 			target.SetBytes(v)
 		}
