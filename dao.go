@@ -454,7 +454,7 @@ func (d *Dao) fetchStructFieldName(entityType reflect.Type, i int) string {
 	columnName := tag.Get("db")
 	if columnName == "" {
 		columnName = tag.Get("json")
-		if columnName != "" {
+		if columnName == "" {
 			columnName = UnderscoreName(entityType.Field(i).Name)
 		}
 	}
