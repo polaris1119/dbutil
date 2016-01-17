@@ -7,6 +7,7 @@
 package dbutil_test
 
 import (
+	"testing"
 	"time"
 
 	"github.com/polaris1119/dbutil"
@@ -14,6 +15,72 @@ import (
 
 func init() {
 	dbutil.InitDB("root:@tcp(localhost:3306)/studygolang?charset=utf8")
+}
+
+type Test struct {
+	Id    uint   `json:"id"`
+	Title string `json:"title"`
+}
+
+func (t *Test) Table() string {
+	return "test"
+}
+
+// 社区主题信息
+type Topic struct {
+	Tid           int       `json:"tid" pk:"1"`
+	Title         string    `json:"title"`
+	Content       string    `json:"content"`
+	Nid           int       `json:"nid"`
+	Uid           int       `json:"uid"`
+	Flag          uint8     `json:"flag"`
+	Lastreplyuid  int       `json:"lastreplyuid"`
+	Lastreplytime time.Time `json:"lastreplytime"`
+	EditorUid     int       `json:"editor_uid"`
+	Top           bool      `json:"istop" db:"top"`
+	Ctime         time.Time `json:"ctime"`
+	Mtime         time.Time `json:"mtime"`
+
+	// 为了方便，加上Node（节点名称，数据表没有）
+	// Node string
+}
+
+func (*Topic) Table() string {
+	return "topics"
+}
+
+// 社区主题扩展（计数）信息
+type TopicEx struct {
+	Tid   int       `json:"tid" pk:"1"`
+	View  int       `json:"view"`
+	Reply int       `json:"reply"`
+	Like  int       `json:"like"`
+	Mtime time.Time `json:"mtime"`
+}
+
+func (*TopicEx) Table() string {
+	return "topics_ex"
+}
+
+func TestFindBySql(t *testing.T) {
+	dao := dbutil.NewDao()
+	strSql := "SELECT * FROM topics t LEFT JOIN topics_ex ex ON t.tid=ex.tid"
+	rows, err := dao.FindBySql(strSql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var (
+		topics   = make([]*Topic, 10)
+		topicExs = make([]*TopicEx, 10)
+	)
+
+	err = dao.ScanRows(rows, topics, topicExs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal(topics[0].Uid, "==", topicExs[0].Mtime)
 }
 
 // func TestFindOne(t *testing.T) {
@@ -120,30 +187,6 @@ func init() {
 
 // 	}
 // }
-
-type Test struct {
-	Id    uint   `json:"id"`
-	Title string `json:"title"`
-}
-
-func (t *Test) Table() string {
-	return "test"
-}
-
-type Topics struct {
-	Tid           uint      `json:"tid" pk:"1"`
-	Title         string    `json:"title"`
-	Content       string    `json:"content"`
-	Nid           int       `json:"nid"`
-	Uid           uint32    `json:"uid"`
-	Lastreplyuid  uint32    `json:"lastreplyuid"`
-	Lastreplytime time.Time `json:"lastreplytime"`
-	Top           bool      `db:"top" json:"istop"`
-}
-
-func (t *Topics) Table() string {
-	return "topics"
-}
 
 // func TestInsert(t *testing.T) {
 // 	test := &Test{

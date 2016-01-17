@@ -10,14 +10,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/polaris1119/goutils"
+	"github.com/polaris1119/logger"
 )
 
 const (
@@ -64,12 +65,25 @@ type Dao struct {
 
 	tx    *sql.Tx
 	txErr error
+
+	logger Logger
 }
 
 func NewDao() *Dao {
+	objLog := logger.New(os.Stdout)
+	return NewDaoWithLogger(objLog)
+}
+
+func NewDaoWithLogger(objLog Logger) *Dao {
+	if db == nil {
+		panic("You should call dbutil.InitDB at first!")
+	}
+
 	return &Dao{
 		whereVal: []interface{}{},
 		setVal:   []interface{}{},
+
+		logger: objLog,
 	}
 }
 
@@ -192,6 +206,11 @@ func (d *Dao) FindAll(entities interface{}) error {
 
 	d.fetchStructFieldNames(entityType)
 
+	sliceCap := entitiesVal.Cap()
+	if sliceCap < d.total {
+		d.total = sliceCap
+	}
+
 	stmt, err := d.prepare(d.genFindSql())
 	if err != nil {
 		return err
@@ -223,7 +242,8 @@ func (d *Dao) FindAll(entities interface{}) error {
 	for rows.Next() {
 		err = rows.Scan(dests...)
 		if err != nil {
-			return err
+			d.logger.Errorln("[dbutil] FindAll rows scan error:", err)
+			break
 		}
 
 		entityVal = reflect.New(entityType).Elem()
@@ -231,6 +251,10 @@ func (d *Dao) FindAll(entities interface{}) error {
 		entitiesVal.Index(colNum).Set(entityVal.Addr())
 
 		colNum++
+
+		if colNum >= sliceCap {
+			break
+		}
 	}
 
 	return nil
@@ -250,6 +274,168 @@ func (d *Dao) FindBySql(strSql string, args ...interface{}) (*sql.Rows, error) {
 	return rows, nil
 }
 
+func (d *Dao) ScanRows(rows *sql.Rows, mainEntities interface{}, secondEntities interface{}, entitiesInter ...interface{}) error {
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	dests := make([]interface{}, len(columns))
+	for i := range dests {
+		var dest interface{}
+		dests[i] = &dest
+	}
+
+	mainEntitiesVal := reflect.ValueOf(mainEntities)
+	mainEntityType := reflect.TypeOf(mainEntities).Elem()
+
+	if mainEntityType.Kind() == reflect.Ptr {
+		mainEntityType = mainEntityType.Elem()
+	}
+
+	sliceCap := mainEntitiesVal.Cap()
+
+	secondEntitiesVal := reflect.ValueOf(secondEntities)
+	secondEntityType := reflect.TypeOf(secondEntities).Elem()
+
+	if secondEntityType.Kind() == reflect.Ptr {
+		secondEntityType = secondEntityType.Elem()
+	}
+
+	var (
+		thirdEntitiesVal reflect.Value
+		thirdEntityType  reflect.Type
+	)
+	if len(entitiesInter) > 1 {
+		thirdEntitiesVal = reflect.ValueOf(entitiesInter[0])
+		thirdEntityType = reflect.TypeOf(entitiesInter[0]).Elem()
+		if thirdEntityType.Kind() == reflect.Ptr {
+			thirdEntityType = thirdEntityType.Elem()
+		}
+	}
+
+	rowIndex := 0
+	for rows.Next() {
+		err = rows.Scan(dests...)
+		if err != nil {
+			d.logger.Errorln("[dbutil] ScanRows error:", err)
+			break
+		}
+
+		mainEntityVal := reflect.New(mainEntityType).Elem()
+		secondEntityVal := reflect.New(secondEntityType).Elem()
+		var thirdEntityVal reflect.Value
+		if thirdEntitiesVal.IsValid() {
+			thirdEntityVal = reflect.New(thirdEntityType).Elem()
+		}
+
+		for i, col := range columns {
+			col = goutils.CamelName(col)
+			fieldVal := mainEntityVal.FieldByNameFunc(func(name string) bool {
+				return match(name, col, mainEntityVal)
+			})
+			if !fieldVal.IsValid() {
+				fieldVal = secondEntityVal.FieldByNameFunc(func(name string) bool {
+					return match(name, col, secondEntityVal)
+				})
+			} else {
+				// 值设置过，不再设置
+				if !d.isZero(fieldVal.Interface()) {
+					fieldVal = secondEntityVal.FieldByNameFunc(func(name string) bool {
+						return match(name, col, secondEntityVal)
+					})
+				}
+			}
+
+			if !fieldVal.IsValid() || !d.isZero(fieldVal.Interface()) {
+				if thirdEntityVal.IsValid() {
+					fieldVal = thirdEntityVal.FieldByNameFunc(func(name string) bool {
+						return match(name, col, thirdEntityVal)
+					})
+				}
+			}
+
+			if fieldVal.IsValid() && fieldVal.CanSet() {
+				assignTo(fieldVal, reflect.ValueOf(dests[i]).Elem())
+			}
+		}
+
+		mainEntitiesVal.Index(rowIndex).Set(mainEntityVal.Addr())
+		secondEntitiesVal.Index(rowIndex).Set(secondEntityVal.Addr())
+		if thirdEntitiesVal.IsValid() {
+			thirdEntitiesVal.Index(rowIndex).Set(thirdEntityVal.Addr())
+		}
+
+		rowIndex++
+
+		if rowIndex >= sliceCap {
+			break
+		}
+	}
+
+	return nil
+}
+
+func match(name, col string, entityVal reflect.Value) bool {
+	if name == col {
+		return true
+	}
+
+	entityType := entityVal.Type()
+	numField := entityType.NumField()
+	for i := 0; i < numField; i++ {
+		if entityType.Field(i).Name == name {
+			entityTag := entityType.Field(i).Tag
+			tagVal := entityTag.Get("db")
+			if tagVal == "" {
+				tagVal = entityTag.Get("json")
+			}
+
+			if goutils.CamelName(tagVal) == col {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func (d *Dao) isZero(inter interface{}) bool {
+	switch v := inter.(type) {
+	case string:
+		return v == ""
+	case uint8:
+		return v == 0
+	case uint16:
+		return v == 0
+	case uint32:
+		return v == 0
+	case uint64:
+		return v == 0
+	case uint:
+		return v == 0
+	case int8:
+		return v == 0
+	case int16:
+		return v == 0
+	case int32:
+		return v == 0
+	case int64:
+		return v == 0
+	case int:
+		return v == 0
+	case float32:
+		return v == 0
+	case float64:
+		return v == 0.0
+	case bool:
+		return v == false
+	case time.Time:
+		return v.IsZero()
+	default:
+		return false
+	}
+}
+
 func (d *Dao) FindOneBySql(strSql string, args ...interface{}) error {
 	return nil
 }
@@ -261,11 +447,11 @@ func (d *Dao) fillStructFields(fieldNum int, entityType reflect.Type, entityVal 
 		if columnName == "" {
 			columnName = structField.Tag.Get("json")
 			if columnName == "" {
-				columnName = UnderscoreName(structField.Name)
+				columnName = goutils.UnderscoreName(structField.Name)
 			}
 		}
 
-		pos := SearchString(columns, columnName)
+		pos := goutils.SearchString(columns, columnName)
 		destVal := dests[pos]
 
 		filedVal := entityVal.Field(i)
@@ -355,7 +541,7 @@ func (d *Dao) Persist(entity interface{}, updateField string) (int64, error) {
 			d.where += " AND " + columnName + "=?"
 			d.whereVal = append(d.whereVal, entityVal.Field(i).Interface())
 		} else {
-			pos := SearchString(updateFields, columnName)
+			pos := goutils.SearchString(updateFields, columnName)
 			if pos != -1 {
 				d.set += "," + columnName + "=?"
 				d.setVal = append(d.setVal, entityVal.Field(i).Interface())
@@ -456,7 +642,7 @@ func (d *Dao) fetchStructFieldName(entityType reflect.Type, i int) string {
 	if columnName == "" {
 		columnName = tag.Get("json")
 		if columnName == "" {
-			columnName = UnderscoreName(entityType.Field(i).Name)
+			columnName = goutils.UnderscoreName(entityType.Field(i).Name)
 		}
 	}
 	return columnName
@@ -555,33 +741,6 @@ type Cruder interface {
 	Reader
 	Updater
 	Deleter
-}
-
-// 驼峰式写法转为下划线写法
-func UnderscoreName(name string) string {
-	buffer := goutils.NewBuffer()
-	for i, r := range name {
-		if unicode.IsUpper(r) {
-			if i != 0 {
-				buffer.AppendRune('_')
-			}
-			buffer.AppendRune(unicode.ToLower(r))
-		} else {
-			buffer.AppendRune(r)
-		}
-	}
-
-	return buffer.String()
-}
-
-func SearchString(slice []string, s string) int {
-	for i, v := range slice {
-		if s == v {
-			return i
-		}
-	}
-
-	return -1
 }
 
 func assignTo(target, value reflect.Value) {
